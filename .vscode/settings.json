@@ -1,5 +1,8 @@
 {
     "files.associations": {
-        "condition_variable": "cpp"
+        "condition_variable": "cpp",
+        "chrono": "cpp",
+        "system_error": "cpp",
+        "mutex": "cpp"
     }
 }
