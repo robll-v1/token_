@@ -84,20 +84,81 @@ std::unique_ptr<TokenProducer> producer;  // 独占所有权
 
 ### 4. 可中断的等待机制
 
-**问题**：传统的 `condition_variable::wait()` 无法响应停止信号，可能导致线程永久阻塞。
+#### 为什么需要中断？
+
+**如果不支持中断会发生什么？**
+
+假设消费者线程正在等待 token，但此时程序需要关闭：
+
+```cpp
+// ❌ 问题代码：无法中断的等待
+void consumer_thread() {
+    while (running_) {
+        // 如果 token 不足，这里会永久阻塞
+        token_manager_->ConsumeTokens(3);  // 无法响应 stop() 信号！
+    }
+}
+
+// main 函数中
+consumer->stop();  // 设置 running_ = false
+consumer->join();  // 等待线程结束... ❌ 永远等不到！线程在等待中！
+```
+
+**问题场景：**
+
+1. **程序无法正常退出**
+   - 主程序调用 `stop()` 后，消费者线程仍在 `wait()` 中阻塞
+   - `join()` 会一直等待，程序无法退出
+   - 用户按 Ctrl+C 也无法立即响应
+
+2. **资源无法释放**
+   - 线程对象无法销毁，资源泄漏
+   - 如果消费者对象在析构函数中调用 `stop()`，析构函数会永久阻塞
+
+3. **用户体验差**
+   - 服务器程序需要重启时，无法优雅关闭
+   - 应用程序退出需要等待很长时间（甚至永远）
+
+4. **实际生产环境问题**
+   - 服务更新时无法平滑重启
+   - 系统关闭时可能被强制 kill，导致数据丢失
 
 **解决方案**：使用 `wait_for()` 定期检查停止标志
+
 ```cpp
 bool ConsumeTokensWithStopCheck(size_t n, std::atomic<bool>* stop_flag) {
+    std::unique_lock<std::mutex> lock(mtx_);
     while (current_tokens_ < n) {
+        // ✅ 定期检查停止标志
         if (stop_flag && stop_flag->load()) {
-            return false;  // 响应停止信号
+            return false;  // 立即响应停止信号
         }
-        cond_.wait_for(lock, std::chrono::milliseconds(100), predicate);
+        // ✅ 使用 wait_for 而不是 wait，每 100ms 检查一次
+        cond_.wait_for(lock, std::chrono::milliseconds(100), [this, n, stop_flag] () {
+            return current_tokens_ >= n || (stop_flag && stop_flag->load());
+        });
+        // ✅ 再次检查，确保及时响应
+        if (stop_flag && stop_flag->load()) {
+            return false;
+        }
     }
-    // ...
+    current_tokens_ -= n;
+    return true;
 }
 ```
+
+**中断机制的优势：**
+
+- ✅ **优雅退出**：程序可以快速响应停止信号
+- ✅ **资源管理**：确保线程能够正确退出，资源得到释放
+- ✅ **用户体验**：程序关闭时无需长时间等待
+- ✅ **生产可用**：满足实际生产环境的需求
+
+**性能权衡：**
+
+- 使用 `wait_for(100ms)` 而不是 `wait()` 会在每 100ms 检查一次停止标志
+- 这带来微小的性能开销，但换来了可中断性
+- 对于大多数应用场景，这个开销是可以接受的
 
 ### 5. RAII 资源管理
 
@@ -269,6 +330,15 @@ token_/
 
 ### Q: 为什么消费者线程会永久阻塞？
 **A**: 如果使用 `ConsumeTokens()` 而不是 `ConsumeTokensWithStopCheck()`，线程在等待时会无法响应停止信号。解决方案是使用可中断的等待机制。
+
+### Q: 为什么要中断？不中断会有什么问题？
+**A**: 不中断会导致以下严重问题：
+1. **程序无法退出**：`stop()` 后线程仍在 `wait()` 中，`join()` 会永久等待
+2. **资源泄漏**：线程无法正常销毁，资源无法释放
+3. **用户体验差**：程序关闭需要很长时间或永远无法关闭
+4. **生产环境问题**：服务无法平滑重启，系统关闭时可能被强制 kill
+
+中断机制允许线程在等待时定期检查停止标志，确保能够及时响应停止信号，实现优雅退出。
 
 ### Q: 为什么需要 `joinable()` 检查？
 **A**: 对已经 join 过的线程再次 join 会导致未定义行为。`joinable()` 检查确保线程是可 join 的。
