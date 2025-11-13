@@ -12,8 +12,9 @@
             ],
             "windowsSdkVersion": "10.0.26100.0",
             "cStandard": "c17",
-            "intelliSenseMode": "windows-msvc-x64",
-            "configurationProvider": "c++17"
+            "intelliSenseMode": "gcc-arm",
+            "configurationProvider": "c++17",
+            "compilerPath": "C:/msys64/mingw64/bin/g++.exe"
         }
     ],
     "version": 4
